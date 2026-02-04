@@ -47,9 +47,5 @@ COPY . .
 # Create data directory for SQLite database
 RUN mkdir -p /app/data
 
-# Set environment variables for Puppeteer
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
-ENV PUPPETEER_EXECUTABLE_PATH=/root/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome
-
 # Run the digest job
 CMD ["node", "src/index.js", "--run-now"]
