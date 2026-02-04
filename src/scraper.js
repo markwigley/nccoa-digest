@@ -1,6 +1,6 @@
 /**
  * Web scraper for NC Court of Appeals opinion filings
- * Uses Puppeteer to handle JavaScript-rendered content and dropdowns
+ * Uses Puppeteer to handle JavaScript-rendered content
  */
 
 import puppeteer from 'puppeteer';
@@ -30,21 +30,8 @@ export async function fetchNewOpinions() {
   try {
     const page = await browser.newPage();
 
-    // Block images and stylesheets to speed up loading
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    page.setDefaultTimeout(30000); // 30 second timeout
-
-    console.log('Navigating to NC Court of Appeals opinion filings page...');
-    await page.goto(config.nccourts.opinionsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    page.setDefaultTimeout(60000); // 60 second timeout
 
     // Get the current year
     const currentYear = new Date().getFullYear();
@@ -54,97 +41,39 @@ export async function fetchNewOpinions() {
     const reviewedUrls = getReviewedPdfUrls();
     console.log(`Already reviewed ${reviewedUrls.size} opinions`);
 
-    const allNewOpinions = [];
+    // Navigate directly to the year-specific URL
+    // URL format: https://appellate.nccourts.org/opinion-filings/?c=coa&year=2026
+    const yearUrl = `${config.nccourts.baseUrl}/opinion-filings/?c=coa&year=${currentYear}`;
+    console.log(`Navigating to: ${yearUrl}`);
 
-    // Select the current year from the dropdown
-    await selectYear(page, currentYear);
+    await page.goto(yearUrl, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
 
-    // Fetch opinions for current year
+    // Wait for page to fully render
+    console.log('Waiting for page content to load...');
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Debug: Log page title and URL
+    const pageTitle = await page.title();
+    const currentUrl = page.url();
+    console.log(`Page title: ${pageTitle}`);
+    console.log(`Current URL: ${currentUrl}`);
+
+    // Debug: Get page content length
+    const content = await page.content();
+    console.log(`Page content length: ${content.length} characters`);
+
+    // Fetch opinions from the page
     const opinions = await scrapeOpinionsFromPage(page, currentYear, reviewedUrls);
-    allNewOpinions.push(...opinions);
 
-    console.log(`Found ${allNewOpinions.length} new opinions total`);
-    return allNewOpinions;
+    console.log(`Found ${opinions.length} new opinions total`);
+    return opinions;
 
   } finally {
     await browser.close();
   }
-}
-
-/**
- * Select a year from the dropdown menu
- * @param {Page} page - Puppeteer page
- * @param {number} year - Year to select
- */
-async function selectYear(page, year) {
-  console.log(`Selecting year ${year} from dropdown...`);
-
-  // Wait for the page to be fully loaded
-  await page.waitForNetworkIdle();
-
-  // Look for year dropdown/select element or year links
-  // The site may use different patterns - try multiple approaches
-
-  // Approach 1: Look for a select dropdown
-  const selectDropdown = await page.$('select[name*="year"], select#year, select.year-select');
-  if (selectDropdown) {
-    await page.select('select[name*="year"], select#year, select.year-select', String(year));
-    await page.waitForNetworkIdle();
-    console.log(`Selected year ${year} from dropdown`);
-    return;
-  }
-
-  // Approach 2: Look for clickable year links/buttons containing the year text
-  const yearClicked = await page.evaluate((yr) => {
-    // Find links or buttons containing the year
-    const elements = [...document.querySelectorAll('a, button, [data-year]')];
-    for (const el of elements) {
-      if (el.textContent.includes(yr) || el.getAttribute('data-year') === yr) {
-        el.click();
-        return true;
-      }
-    }
-    return false;
-  }, String(year));
-
-  if (yearClicked) {
-    await page.waitForNetworkIdle();
-    console.log(`Clicked year ${year} link`);
-    return;
-  }
-
-  // Approach 3: Look for a dropdown that needs to be opened first
-  const dropdownToggle = await page.$('.dropdown-toggle, [data-toggle="dropdown"], .year-dropdown');
-  if (dropdownToggle) {
-    await dropdownToggle.click();
-    await new Promise(resolve => setTimeout(resolve, 500)); // Wait for dropdown to open
-
-    const optionClicked = await page.evaluate((yr) => {
-      const elements = [...document.querySelectorAll('a, li, .dropdown-item')];
-      for (const el of elements) {
-        if (el.textContent.includes(yr)) {
-          el.click();
-          return true;
-        }
-      }
-      return false;
-    }, String(year));
-
-    if (optionClicked) {
-      await page.waitForNetworkIdle();
-      console.log(`Selected year ${year} from dropdown menu`);
-      return;
-    }
-  }
-
-  // Approach 4: Check if current year is already displayed
-  const pageContent = await page.content();
-  if (pageContent.includes(String(year))) {
-    console.log(`Year ${year} appears to already be displayed on the page`);
-    return;
-  }
-
-  console.log(`Warning: Could not find year selector for ${year}, proceeding with current page`);
 }
 
 /**
@@ -159,21 +88,66 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
 
   const opinions = [];
 
-  // Wait for opinion content to load
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  // Try multiple selectors to find opinion links
+  // The NC Courts site may use different structures
+  const selectors = [
+    'a[href*=".pdf"]',
+    'a[href*="opinions"]',
+    'table a',
+    '.opinion-link',
+    'td a',
+    'a[href*="coa"]',
+  ];
 
-  // Find all PDF links on the page
-  const pdfLinks = await page.$$('a[href*=".pdf"]');
-  console.log(`Found ${pdfLinks.length} PDF links`);
+  let allLinks = [];
 
-  for (const link of pdfLinks) {
+  for (const selector of selectors) {
+    try {
+      const links = await page.$$(selector);
+      if (links.length > 0) {
+        console.log(`Selector "${selector}" found ${links.length} elements`);
+        allLinks = allLinks.concat(links);
+      }
+    } catch (err) {
+      // Selector not found, continue
+    }
+  }
+
+  // Deduplicate links by href
+  const seenHrefs = new Set();
+  const uniqueLinks = [];
+
+  for (const link of allLinks) {
+    try {
+      const href = await page.evaluate(el => el.getAttribute('href'), link);
+      if (href && !seenHrefs.has(href)) {
+        seenHrefs.add(href);
+        uniqueLinks.push(link);
+      }
+    } catch (err) {
+      // Skip problematic links
+    }
+  }
+
+  console.log(`Found ${uniqueLinks.length} unique links to process`);
+
+  // Debug: Log all hrefs found
+  const allHrefs = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('a')).map(a => a.href).slice(0, 20);
+  });
+  console.log('Sample of links found on page:', allHrefs);
+
+  for (const link of uniqueLinks) {
     try {
       const href = await page.evaluate(el => el.getAttribute('href'), link);
       const text = await page.evaluate(el => el.textContent, link);
 
       if (!href) continue;
 
-      const fullUrl = href.startsWith('http') ? href : `${config.nccourts.baseUrl}${href}`;
+      // Only process PDF links (opinions are PDFs)
+      if (!href.toLowerCase().includes('.pdf')) continue;
+
+      const fullUrl = href.startsWith('http') ? href : `${config.nccourts.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
 
       if (reviewedUrls.has(fullUrl)) {
         console.log(`Skipping already reviewed: ${text?.trim() || fullUrl}`);
@@ -182,6 +156,8 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
 
       // Extract case info from link text or surrounding context
       const parentText = await page.evaluate(el => {
+        const row = el.closest('tr');
+        if (row) return row.textContent;
         const parent = el.parentElement;
         return parent ? parent.textContent : el.textContent;
       }, link);
@@ -196,10 +172,10 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
       };
 
       opinions.push(opinion);
-      console.log(`Found new opinion: ${opinion.caseName}`);
+      console.log(`Found new opinion: ${opinion.caseName} - ${opinion.pdfUrl}`);
 
     } catch (err) {
-      console.error('Error processing PDF link:', err.message);
+      console.error('Error processing link:', err.message);
     }
   }
 
