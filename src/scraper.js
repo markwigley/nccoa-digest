@@ -87,16 +87,20 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
   const opinionData = await page.evaluate(() => {
     const results = [];
 
-    // Method 1: Look for elements with onclick handlers containing PDF URLs
+    // Method 1: Look for elements with onclick handlers containing opinion URLs
+    // NC Courts uses viewOpinion("url") pattern with URLs like:
+    // http://appellate.nccourts.org/opinions/?c=2&pdf=44825
     const clickableElements = document.querySelectorAll('[onclick]');
     for (const el of clickableElements) {
       const onclick = el.getAttribute('onclick') || '';
-      // Look for window.open or PDF URLs in onclick
-      const pdfMatch = onclick.match(/['"]([^'"]*\.pdf[^'"]*)['"]/i) ||
-                       onclick.match(/window\.open\s*\(\s*['"]([^'"]+)['"]/i);
-      if (pdfMatch) {
+      // Look for viewOpinion(), window.open(), or any URL in onclick
+      const urlMatch = onclick.match(/viewOpinion\s*\(\s*["']([^"']+)["']\s*\)/i) ||
+                       onclick.match(/window\.open\s*\(\s*["']([^"']+)["']/i) ||
+                       onclick.match(/["'](https?:\/\/[^"']+opinions[^"']+)["']/i) ||
+                       onclick.match(/["']([^"']*\.pdf[^"']*)["']/i);
+      if (urlMatch) {
         results.push({
-          pdfUrl: pdfMatch[1],
+          pdfUrl: urlMatch[1],
           text: el.textContent?.trim() || '',
           rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
           source: 'onclick'
