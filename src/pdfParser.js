@@ -83,26 +83,60 @@ function normalizeDate(dateStr) {
  * @returns {string|null}
  */
 export function extractCaseName(text) {
-  // Get first page content
-  const firstPage = text.substring(0, 3000);
+  // Get first page content - use more text to find case name
+  const firstPage = text.substring(0, 5000);
 
-  // Pattern for "PLAINTIFF v. DEFENDANT" or "IN RE: MATTER"
+  // NC Court of Appeals opinions typically have case names in specific formats
   const patterns = [
-    // "SMITH v. JONES" or "SMITH, Plaintiff v. JONES, Defendant"
-    /([A-Z][A-Z\s,.'()-]+)\s+v\.\s+([A-Z][A-Z\s,.'()-]+)/,
+    // "ADVISOR LAW, LLC v. HOLLAND" or "ADVISOR LAW, LLC, Plaintiff v. HOLLAND, Defendant"
+    /([A-Z][A-Z0-9\s,.'&()-]+?)\s+v\.\s+([A-Z][A-Z0-9\s,.'&()-]+?)(?:\s*\n|\s+No\.|\s+COA|\s+\d{2}-)/,
+
+    // "State v. Defendant" pattern (criminal cases)
+    /(STATE\s+(?:OF\s+NORTH\s+CAROLINA)?)\s+v\.\s+([A-Z][A-Za-z\s,.'()-]+?)(?:\s*\n|\s+No\.|\s+COA|\s+\d{2}-)/i,
+
+    // More flexible "X v. Y" pattern
+    /([A-Z][A-Za-z0-9\s,.'&()-]{2,50}?)\s+v\.\s+([A-Z][A-Za-z0-9\s,.'&()-]{2,50}?)(?:\s*\n|\s+No\.|\s+COA|\s+\d{2}-|\s+Filed)/i,
+
     // "In re: NAME" or "In the Matter of NAME"
-    /(?:In\s+(?:re|the\s+Matter\s+of)):?\s+([A-Z][A-Z\s,.'()-]+)/i,
-    // "STATE OF NORTH CAROLINA v. DEFENDANT"
-    /(STATE\s+OF\s+NORTH\s+CAROLINA)\s+v\.\s+([A-Z][A-Z\s,.'()-]+)/i,
+    /(?:In\s+(?:re|the\s+Matter\s+of)):?\s+([A-Z][A-Za-z\s,.'()-]+?)(?:\s*\n|\s+No\.|\s+COA)/i,
+
+    // Look for case name after "NORTH CAROLINA COURT OF APPEALS" header
+    /NORTH\s+CAROLINA\s+COURT\s+OF\s+APPEALS[^\n]*\n+([A-Z][A-Za-z0-9\s,.'&()-]+?)\s+v\.\s+([A-Z][A-Za-z0-9\s,.'&()-]+?)(?:\s*\n|\s+No\.)/i,
+
+    // Standard pattern with plaintiff/defendant labels
+    /([A-Z][A-Z\s,.'()-]+),?\s*(?:Plaintiff|Appellant|Petitioner)[^v]*v\.\s*([A-Z][A-Z\s,.'()-]+),?\s*(?:Defendant|Appellee|Respondent)/i,
   ];
 
   for (const pattern of patterns) {
     const match = firstPage.match(pattern);
     if (match) {
+      let caseName;
       if (match[2]) {
-        return `${cleanName(match[1])} v. ${cleanName(match[2])}`;
+        const party1 = cleanName(match[1]);
+        const party2 = cleanName(match[2]);
+        // Skip if either party is too short or looks like a case number
+        if (party1.length < 3 || party2.length < 2) continue;
+        if (/^\d+-\d+/.test(party1) || /^\d+-\d+/.test(party2)) continue;
+        caseName = `${party1} v. ${party2}`;
+      } else {
+        caseName = cleanName(match[1]);
+        if (caseName.length < 3) continue;
       }
-      return cleanName(match[1]);
+
+      // Validate it looks like a real case name (not a number)
+      if (!/^\d+-\d+/.test(caseName) && caseName.length > 5) {
+        return caseName;
+      }
+    }
+  }
+
+  // Fallback: look for any "X v. Y" pattern in the text
+  const simpleMatch = firstPage.match(/([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+v\.\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)/);
+  if (simpleMatch) {
+    const party1 = simpleMatch[1].trim();
+    const party2 = simpleMatch[2].trim();
+    if (party1.length >= 3 && party2.length >= 2) {
+      return `${party1} v. ${party2}`;
     }
   }
 

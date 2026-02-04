@@ -60,7 +60,10 @@ function buildPrompt(opinionInfo) {
   return `You are a legal analyst creating concise summaries of NC Court of Appeals opinions for a weekly digest sent to attorneys. Generate a summary in the exact style shown in the examples below.
 
 IMPORTANT FORMATTING REQUIREMENTS:
-1. Start with the case name in bold: **Case Name**
+1. Start with the case name in bold: **Case Name** (e.g., **Smith v. Jones** or **State v. Defendant**)
+   - CRITICAL: Always use the actual party names (e.g., "Advisor Law, LLC v. Holland"), NOT the case number (e.g., "24-1035")
+   - Extract the case name from the opinion text - it's usually near the top (e.g., "ADVISOR LAW, LLC v. HOLLAND")
+   - For criminal cases, format as "State v. [Defendant's Last Name]"
 2. Follow with a date parenthetical using the opinion date from the first page: (Mon. DD, YYYY)
 3. Include case type/subject in parentheses: (Civil – Employment) or (Criminal – Sentencing)
 4. Include judge names in parentheses with the author in CAPS, others in regular case, and note any dissents
@@ -89,7 +92,7 @@ ${opinionInfo.firstPageContent}
 
 ---
 
-Generate only the summary paragraph, nothing else. Start with **${opinionInfo.caseName || 'Case Name'}**`;
+Generate only the summary paragraph, nothing else. Start with the case name in bold (extract from the opinion text above - look for "X v. Y" pattern near the top). Do NOT use a case number like "${opinionInfo.caseName}" if it looks like a number - always use the actual party names.`;
 }
 
 /**
