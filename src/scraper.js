@@ -131,11 +131,49 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
 
   console.log(`Found ${uniqueLinks.length} unique links to process`);
 
-  // Debug: Log all hrefs found
-  const allHrefs = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('a')).map(a => a.href).slice(0, 20);
+  // Debug: Log ALL hrefs on the page to find where opinions might be
+  const allPageLinks = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('a')).map(a => ({
+      href: a.href,
+      text: a.textContent?.trim().substring(0, 50)
+    }));
   });
-  console.log('Sample of links found on page:', allHrefs);
+
+  // Log links that might be opinions (contain pdf, case numbers, or opinion-like patterns)
+  const potentialOpinionLinks = allPageLinks.filter(link =>
+    link.href.includes('.pdf') ||
+    link.href.includes('opinions/') ||
+    link.href.includes('p-') ||
+    /\d{2}-\d+/.test(link.text) ||
+    link.text.includes(' v. ') ||
+    link.text.includes(' v ') ||
+    link.text.includes('State')
+  );
+  console.log('Potential opinion links found:', potentialOpinionLinks.slice(0, 30));
+
+  // Also log the page HTML structure around tables to understand the layout
+  const tableInfo = await page.evaluate(() => {
+    const tables = document.querySelectorAll('table');
+    return Array.from(tables).map((t, i) => ({
+      index: i,
+      rows: t.rows?.length || 0,
+      className: t.className,
+      id: t.id,
+      firstRowContent: t.rows?.[0]?.textContent?.trim().substring(0, 100)
+    }));
+  });
+  console.log('Tables on page:', tableInfo);
+
+  // Look for any elements containing case-like patterns
+  const casePatterns = await page.evaluate(() => {
+    const bodyText = document.body.innerText;
+    const matches = bodyText.match(/\d{2}[- ]?COA[- ]?\d+/gi) || [];
+    return [...new Set(matches)].slice(0, 20);
+  });
+  console.log('Case number patterns found in page text:', casePatterns);
+
+  // Sample of links found on page
+  console.log('Sample of all links on page:', allPageLinks.slice(0, 20).map(l => l.href));
 
   for (const link of uniqueLinks) {
     try {
