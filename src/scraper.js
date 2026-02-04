@@ -162,6 +162,14 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
         return parent ? parent.textContent : el.textContent;
       }, link);
 
+      // Check if this is a published opinion
+      // Skip unpublished opinions - only include published ones
+      const contextText = (parentText || text || '').toLowerCase();
+      if (contextText.includes('unpublished')) {
+        console.log(`Skipping unpublished opinion: ${text?.trim() || fullUrl}`);
+        continue;
+      }
+
       const opinion = {
         caseName: text?.trim() || 'Unknown',
         caseNumber: extractCaseNumber(parentText || text || ''),
@@ -169,10 +177,11 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
         filingDate: extractDateFromText(parentText || ''),
         court: 'NC Court of Appeals',
         year: year,
+        published: true,
       };
 
       opinions.push(opinion);
-      console.log(`Found new opinion: ${opinion.caseName} - ${opinion.pdfUrl}`);
+      console.log(`Found new PUBLISHED opinion: ${opinion.caseName} - ${opinion.pdfUrl}`);
 
     } catch (err) {
       console.error('Error processing link:', err.message);
