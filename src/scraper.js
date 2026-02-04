@@ -1,6 +1,6 @@
 /**
  * Web scraper for NC Court of Appeals opinion filings
- * Uses Puppeteer to handle JavaScript-rendered content
+ * Uses Puppeteer to handle JavaScript-rendered content and popup links
  */
 
 import puppeteer from 'puppeteer';
@@ -42,7 +42,6 @@ export async function fetchNewOpinions() {
     console.log(`Already reviewed ${reviewedUrls.size} opinions`);
 
     // Navigate directly to the year-specific URL
-    // URL format: https://appellate.nccourts.org/opinion-filings/?c=coa&year=2026
     const yearUrl = `${config.nccourts.baseUrl}/opinion-filings/?c=coa&year=${currentYear}`;
     console.log(`Navigating to: ${yearUrl}`);
 
@@ -61,10 +60,6 @@ export async function fetchNewOpinions() {
     console.log(`Page title: ${pageTitle}`);
     console.log(`Current URL: ${currentUrl}`);
 
-    // Debug: Get page content length
-    const content = await page.content();
-    console.log(`Page content length: ${content.length} characters`);
-
     // Fetch opinions from the page
     const opinions = await scrapeOpinionsFromPage(page, currentYear, reviewedUrls);
 
@@ -78,6 +73,7 @@ export async function fetchNewOpinions() {
 
 /**
  * Scrape opinions from the current page
+ * Handles JavaScript popup links by extracting URLs from onclick handlers
  * @param {Page} page - Puppeteer page
  * @param {number} year - Year being scraped
  * @param {Set<string>} reviewedUrls - Already reviewed URLs
@@ -86,133 +82,160 @@ export async function fetchNewOpinions() {
 async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
   console.log(`Scraping Court of Appeals opinions for year ${year}...`);
 
+  // Extract opinion data from the page
+  // Look for elements with onclick handlers, data attributes, or href containing PDF paths
+  const opinionData = await page.evaluate(() => {
+    const results = [];
+
+    // Method 1: Look for elements with onclick handlers containing PDF URLs
+    const clickableElements = document.querySelectorAll('[onclick]');
+    for (const el of clickableElements) {
+      const onclick = el.getAttribute('onclick') || '';
+      // Look for window.open or PDF URLs in onclick
+      const pdfMatch = onclick.match(/['"]([^'"]*\.pdf[^'"]*)['"]/i) ||
+                       onclick.match(/window\.open\s*\(\s*['"]([^'"]+)['"]/i);
+      if (pdfMatch) {
+        results.push({
+          pdfUrl: pdfMatch[1],
+          text: el.textContent?.trim() || '',
+          rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
+          source: 'onclick'
+        });
+      }
+    }
+
+    // Method 2: Look for links with href containing PDF
+    const pdfLinks = document.querySelectorAll('a[href*=".pdf"]');
+    for (const el of pdfLinks) {
+      results.push({
+        pdfUrl: el.getAttribute('href'),
+        text: el.textContent?.trim() || '',
+        rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
+        source: 'href'
+      });
+    }
+
+    // Method 3: Look for links with href="javascript:" that might open PDFs
+    const jsLinks = document.querySelectorAll('a[href^="javascript:"]');
+    for (const el of jsLinks) {
+      const href = el.getAttribute('href') || '';
+      const pdfMatch = href.match(/['"]([^'"]*\.pdf[^'"]*)['"]/i);
+      if (pdfMatch) {
+        results.push({
+          pdfUrl: pdfMatch[1],
+          text: el.textContent?.trim() || '',
+          rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
+          source: 'javascript-href'
+        });
+      }
+    }
+
+    // Method 4: Look for data attributes that might contain PDF URLs
+    const dataElements = document.querySelectorAll('[data-pdf], [data-url], [data-href], [data-file]');
+    for (const el of dataElements) {
+      const pdfUrl = el.getAttribute('data-pdf') || el.getAttribute('data-url') ||
+                     el.getAttribute('data-href') || el.getAttribute('data-file');
+      if (pdfUrl && pdfUrl.includes('.pdf')) {
+        results.push({
+          pdfUrl: pdfUrl,
+          text: el.textContent?.trim() || '',
+          rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
+          source: 'data-attr'
+        });
+      }
+    }
+
+    // Method 5: Search for PDF URLs in all script tags
+    const scripts = document.querySelectorAll('script');
+    const pdfUrlPattern = /['"]([^'"]*opinions[^'"]*\.pdf)['"]/gi;
+    for (const script of scripts) {
+      const content = script.textContent || '';
+      let match;
+      while ((match = pdfUrlPattern.exec(content)) !== null) {
+        results.push({
+          pdfUrl: match[1],
+          text: '',
+          rowText: '',
+          source: 'script'
+        });
+      }
+    }
+
+    // Method 6: Look in the raw HTML for PDF URLs (as a fallback)
+    const htmlContent = document.body.innerHTML;
+    const allPdfUrls = htmlContent.match(/['"](\/opinions\/[^'"]*\.pdf)['"]/gi) ||
+                        htmlContent.match(/['"]([^'"]*appellate[^'"]*\.pdf)['"]/gi) ||
+                        htmlContent.match(/['"]([^'"]*coa[^'"]*\.pdf)['"]/gi) || [];
+    for (const match of allPdfUrls) {
+      const url = match.replace(/['"]/g, '');
+      if (!results.some(r => r.pdfUrl === url)) {
+        results.push({
+          pdfUrl: url,
+          text: '',
+          rowText: '',
+          source: 'html-regex'
+        });
+      }
+    }
+
+    return results;
+  });
+
+  console.log(`Found ${opinionData.length} potential opinion entries from page`);
+
+  // Debug: Log what we found
+  if (opinionData.length > 0) {
+    console.log('Sample opinion data found:', opinionData.slice(0, 5));
+  } else {
+    // Extra debugging if nothing found - dump page structure
+    const debugInfo = await page.evaluate(() => {
+      const body = document.body.innerHTML;
+      return {
+        hasPdfInHtml: body.includes('.pdf'),
+        hasOnclick: document.querySelectorAll('[onclick]').length,
+        hasJsHref: document.querySelectorAll('a[href^="javascript:"]').length,
+        sampleText: document.body.innerText.substring(0, 2000),
+        allOnclicks: Array.from(document.querySelectorAll('[onclick]')).slice(0, 10).map(el => ({
+          onclick: el.getAttribute('onclick')?.substring(0, 200),
+          text: el.textContent?.trim().substring(0, 50)
+        }))
+      };
+    });
+    console.log('Debug info:', JSON.stringify(debugInfo, null, 2));
+  }
+
   const opinions = [];
 
-  // Try multiple selectors to find opinion links
-  // The NC Courts site may use different structures
-  const selectors = [
-    'a[href*=".pdf"]',
-    'a[href*="opinions"]',
-    'table a',
-    '.opinion-link',
-    'td a',
-    'a[href*="coa"]',
-  ];
-
-  let allLinks = [];
-
-  for (const selector of selectors) {
+  for (const data of opinionData) {
     try {
-      const links = await page.$$(selector);
-      if (links.length > 0) {
-        console.log(`Selector "${selector}" found ${links.length} elements`);
-        allLinks = allLinks.concat(links);
+      if (!data.pdfUrl) continue;
+
+      // Build full URL
+      let fullUrl = data.pdfUrl;
+      if (!fullUrl.startsWith('http')) {
+        fullUrl = fullUrl.startsWith('/')
+          ? `${config.nccourts.baseUrl}${fullUrl}`
+          : `${config.nccourts.baseUrl}/${fullUrl}`;
       }
-    } catch (err) {
-      // Selector not found, continue
-    }
-  }
 
-  // Deduplicate links by href
-  const seenHrefs = new Set();
-  const uniqueLinks = [];
-
-  for (const link of allLinks) {
-    try {
-      const href = await page.evaluate(el => el.getAttribute('href'), link);
-      if (href && !seenHrefs.has(href)) {
-        seenHrefs.add(href);
-        uniqueLinks.push(link);
-      }
-    } catch (err) {
-      // Skip problematic links
-    }
-  }
-
-  console.log(`Found ${uniqueLinks.length} unique links to process`);
-
-  // Debug: Log ALL hrefs on the page to find where opinions might be
-  const allPageLinks = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll('a')).map(a => ({
-      href: a.href,
-      text: a.textContent?.trim().substring(0, 50)
-    }));
-  });
-
-  // Log links that might be opinions (contain pdf, case numbers, or opinion-like patterns)
-  const potentialOpinionLinks = allPageLinks.filter(link =>
-    link.href.includes('.pdf') ||
-    link.href.includes('opinions/') ||
-    link.href.includes('p-') ||
-    /\d{2}-\d+/.test(link.text) ||
-    link.text.includes(' v. ') ||
-    link.text.includes(' v ') ||
-    link.text.includes('State')
-  );
-  console.log('Potential opinion links found:', potentialOpinionLinks.slice(0, 30));
-
-  // Also log the page HTML structure around tables to understand the layout
-  const tableInfo = await page.evaluate(() => {
-    const tables = document.querySelectorAll('table');
-    return Array.from(tables).map((t, i) => ({
-      index: i,
-      rows: t.rows?.length || 0,
-      className: t.className,
-      id: t.id,
-      firstRowContent: t.rows?.[0]?.textContent?.trim().substring(0, 100)
-    }));
-  });
-  console.log('Tables on page:', tableInfo);
-
-  // Look for any elements containing case-like patterns
-  const casePatterns = await page.evaluate(() => {
-    const bodyText = document.body.innerText;
-    const matches = bodyText.match(/\d{2}[- ]?COA[- ]?\d+/gi) || [];
-    return [...new Set(matches)].slice(0, 20);
-  });
-  console.log('Case number patterns found in page text:', casePatterns);
-
-  // Sample of links found on page
-  console.log('Sample of all links on page:', allPageLinks.slice(0, 20).map(l => l.href));
-
-  for (const link of uniqueLinks) {
-    try {
-      const href = await page.evaluate(el => el.getAttribute('href'), link);
-      const text = await page.evaluate(el => el.textContent, link);
-
-      if (!href) continue;
-
-      // Only process PDF links (opinions are PDFs)
-      if (!href.toLowerCase().includes('.pdf')) continue;
-
-      const fullUrl = href.startsWith('http') ? href : `${config.nccourts.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
-
+      // Skip if already reviewed
       if (reviewedUrls.has(fullUrl)) {
-        console.log(`Skipping already reviewed: ${text?.trim() || fullUrl}`);
+        console.log(`Skipping already reviewed: ${data.text || fullUrl}`);
         continue;
       }
 
-      // Extract case info from link text or surrounding context
-      const parentText = await page.evaluate(el => {
-        const row = el.closest('tr');
-        if (row) return row.textContent;
-        const parent = el.parentElement;
-        return parent ? parent.textContent : el.textContent;
-      }, link);
-
-      // Check if this is a published opinion
-      // Skip unpublished opinions - only include published ones
-      const contextText = (parentText || text || '').toLowerCase();
+      // Check if this is a published opinion (skip unpublished)
+      const contextText = (data.rowText || data.text || '').toLowerCase();
       if (contextText.includes('unpublished')) {
-        console.log(`Skipping unpublished opinion: ${text?.trim() || fullUrl}`);
+        console.log(`Skipping unpublished opinion: ${data.text || fullUrl}`);
         continue;
       }
 
       const opinion = {
-        caseName: text?.trim() || 'Unknown',
-        caseNumber: extractCaseNumber(parentText || text || ''),
+        caseName: data.text || 'Unknown',
+        caseNumber: extractCaseNumber(data.rowText || data.text || ''),
         pdfUrl: fullUrl,
-        filingDate: extractDateFromText(parentText || ''),
+        filingDate: extractDateFromText(data.rowText || ''),
         court: 'NC Court of Appeals',
         year: year,
         published: true,
@@ -222,7 +245,7 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
       console.log(`Found new PUBLISHED opinion: ${opinion.caseName} - ${opinion.pdfUrl}`);
 
     } catch (err) {
-      console.error('Error processing link:', err.message);
+      console.error('Error processing opinion data:', err.message);
     }
   }
 
@@ -235,7 +258,6 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
  * @returns {string}
  */
 function extractCaseNumber(text) {
-  // Common NC Court of Appeals case number patterns
   const patterns = [
     /\b(\d{2,4}[-\s]?COA[-\s]?\d+)\b/i,
     /\b(COA\d{2}-\d+)\b/i,
