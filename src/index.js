@@ -64,9 +64,15 @@ async function runDigestJob() {
       console.log(`\n[${i + 1}/${newOpinions.length}] Processing: ${opinion.caseName || opinion.pdfUrl}`);
 
       try {
-        // Download PDF
-        console.log('  Downloading PDF...');
-        const pdfBuffer = await downloadPdf(opinion.pdfUrl);
+        // Get PDF buffer - either already have it (from zip) or need to download
+        let pdfBuffer;
+        if (opinion.pdfBuffer) {
+          console.log('  Using PDF from zip file...');
+          pdfBuffer = opinion.pdfBuffer;
+        } else {
+          console.log('  Downloading PDF...');
+          pdfBuffer = await downloadPdf(opinion.pdfUrl);
+        }
 
         // Extract information from PDF
         console.log('  Extracting opinion information...');

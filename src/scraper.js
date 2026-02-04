@@ -1,15 +1,17 @@
 /**
  * Web scraper for NC Court of Appeals opinion filings
- * Uses Puppeteer to handle JavaScript-rendered content and popup links
+ * Downloads the zip file of published opinions for more reliable PDF access
  */
 
 import puppeteer from 'puppeteer';
+import AdmZip from 'adm-zip';
 import { config } from './config.js';
 import { getReviewedPdfUrls } from './database.js';
 
 /**
  * Fetch new opinions from the NC Court of Appeals website
- * @returns {Promise<Object[]>} Array of new opinion objects
+ * Uses the "Zip File of Published Opinions" for reliable PDF access
+ * @returns {Promise<Object[]>} Array of new opinion objects with PDF buffers
  */
 export async function fetchNewOpinions() {
   console.log('Launching browser...');
@@ -31,17 +33,15 @@ export async function fetchNewOpinions() {
     const page = await browser.newPage();
 
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    page.setDefaultTimeout(60000); // 60 second timeout
+    page.setDefaultTimeout(60000);
 
-    // Get the current year
     const currentYear = new Date().getFullYear();
     console.log(`Current year: ${currentYear}`);
 
-    // Get already reviewed opinion URLs
     const reviewedUrls = getReviewedPdfUrls();
     console.log(`Already reviewed ${reviewedUrls.size} opinions`);
 
-    // Navigate directly to the year-specific URL
+    // Navigate to the opinions page
     const yearUrl = `${config.nccourts.baseUrl}/opinion-filings/?c=coa&year=${currentYear}`;
     console.log(`Navigating to: ${yearUrl}`);
 
@@ -50,20 +50,49 @@ export async function fetchNewOpinions() {
       timeout: 60000
     });
 
-    // Wait for page to fully render
     console.log('Waiting for page content to load...');
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // Debug: Log page title and URL
     const pageTitle = await page.title();
-    const currentUrl = page.url();
     console.log(`Page title: ${pageTitle}`);
-    console.log(`Current URL: ${currentUrl}`);
 
-    // Fetch opinions from the page
-    const opinions = await scrapeOpinionsFromPage(page, currentYear, reviewedUrls);
+    // Find the zip file link for published opinions
+    const zipUrl = await page.evaluate(() => {
+      // Look for link containing "Zip File" text
+      const links = Array.from(document.querySelectorAll('a'));
+      for (const link of links) {
+        const text = link.textContent?.toLowerCase() || '';
+        const href = link.getAttribute('href') || '';
+        if ((text.includes('zip') && text.includes('published')) ||
+            href.includes('.zip')) {
+          return link.href;
+        }
+      }
+      return null;
+    });
 
-    console.log(`Found ${opinions.length} new opinions total`);
+    if (!zipUrl) {
+      console.log('No zip file link found, falling back to individual opinion scraping...');
+      return await scrapeIndividualOpinions(page, currentYear, reviewedUrls);
+    }
+
+    console.log(`Found zip file URL: ${zipUrl}`);
+
+    // Download the zip file
+    console.log('Downloading zip file of published opinions...');
+    const zipBuffer = await downloadFile(page, zipUrl);
+
+    if (!zipBuffer || zipBuffer.length === 0) {
+      console.log('Failed to download zip file, falling back to individual scraping...');
+      return await scrapeIndividualOpinions(page, currentYear, reviewedUrls);
+    }
+
+    console.log(`Downloaded zip file: ${zipBuffer.length} bytes`);
+
+    // Extract PDFs from the zip file
+    const opinions = await extractOpinionsFromZip(zipBuffer, currentYear, reviewedUrls);
+
+    console.log(`Found ${opinions.length} new published opinions from zip file`);
     return opinions;
 
   } finally {
@@ -72,112 +101,119 @@ export async function fetchNewOpinions() {
 }
 
 /**
- * Scrape opinions from the current page
- * Handles JavaScript popup links by extracting URLs from onclick handlers
+ * Download a file and return its buffer
  * @param {Page} page - Puppeteer page
- * @param {number} year - Year being scraped
- * @param {Set<string>} reviewedUrls - Already reviewed URLs
- * @returns {Promise<Object[]>} Array of opinion objects
+ * @param {string} url - URL to download
+ * @returns {Promise<Buffer>}
  */
-async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
-  console.log(`Scraping Court of Appeals opinions for year ${year}...`);
+async function downloadFile(page, url) {
+  try {
+    const response = await page.evaluate(async (downloadUrl) => {
+      const resp = await fetch(downloadUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const arrayBuffer = await resp.arrayBuffer();
+      return Array.from(new Uint8Array(arrayBuffer));
+    }, url);
 
-  // Extract opinion data from the page
-  // Look for elements with onclick handlers, data attributes, or href containing PDF paths
+    return Buffer.from(response);
+  } catch (err) {
+    console.error(`Error downloading file: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Extract opinions from a zip file buffer
+ * @param {Buffer} zipBuffer - Zip file buffer
+ * @param {number} year - Year
+ * @param {Set<string>} reviewedUrls - Already reviewed URLs
+ * @returns {Promise<Object[]>}
+ */
+async function extractOpinionsFromZip(zipBuffer, year, reviewedUrls) {
+  const opinions = [];
+
+  try {
+    const zip = new AdmZip(zipBuffer);
+    const zipEntries = zip.getEntries();
+
+    console.log(`Zip file contains ${zipEntries.length} entries`);
+
+    for (const entry of zipEntries) {
+      const fileName = entry.entryName;
+
+      // Skip non-PDF files and directories
+      if (entry.isDirectory || !fileName.toLowerCase().endsWith('.pdf')) {
+        continue;
+      }
+
+      // Skip unpublished opinions (if somehow included)
+      if (fileName.toLowerCase().includes('unpublished')) {
+        console.log(`Skipping unpublished: ${fileName}`);
+        continue;
+      }
+
+      // Use filename as unique identifier for deduplication
+      const pdfIdentifier = `zip://${year}/${fileName}`;
+      if (reviewedUrls.has(pdfIdentifier)) {
+        console.log(`Skipping already reviewed: ${fileName}`);
+        continue;
+      }
+
+      // Extract case name from filename
+      // Typical format: "Smith v. Jones.pdf" or "State v. Defendant.pdf"
+      const caseName = fileName
+        .replace(/\.pdf$/i, '')
+        .replace(/_/g, ' ')
+        .trim();
+
+      const pdfBuffer = entry.getData();
+
+      const opinion = {
+        caseName: caseName,
+        caseNumber: extractCaseNumberFromName(caseName),
+        pdfUrl: pdfIdentifier,
+        pdfBuffer: pdfBuffer,
+        filingDate: new Date().toISOString().split('T')[0],
+        court: 'NC Court of Appeals',
+        year: year,
+        published: true,
+      };
+
+      opinions.push(opinion);
+      console.log(`Found published opinion: ${caseName}`);
+    }
+  } catch (err) {
+    console.error(`Error extracting zip file: ${err.message}`);
+  }
+
+  return opinions;
+}
+
+/**
+ * Fallback: Scrape individual opinions from the page
+ * @param {Page} page - Puppeteer page
+ * @param {number} year - Year
+ * @param {Set<string>} reviewedUrls - Already reviewed URLs
+ * @returns {Promise<Object[]>}
+ */
+async function scrapeIndividualOpinions(page, year, reviewedUrls) {
+  console.log(`Scraping individual Court of Appeals opinions for year ${year}...`);
+
   const opinionData = await page.evaluate(() => {
     const results = [];
 
-    // Method 1: Look for elements with onclick handlers containing opinion URLs
-    // NC Courts uses viewOpinion("url") pattern with URLs like:
-    // http://appellate.nccourts.org/opinions/?c=2&pdf=44825
+    // Look for viewOpinion() onclick handlers
     const clickableElements = document.querySelectorAll('[onclick]');
     for (const el of clickableElements) {
       const onclick = el.getAttribute('onclick') || '';
-      // Look for viewOpinion(), window.open(), or any URL in onclick
       const urlMatch = onclick.match(/viewOpinion\s*\(\s*["']([^"']+)["']\s*\)/i) ||
                        onclick.match(/window\.open\s*\(\s*["']([^"']+)["']/i) ||
-                       onclick.match(/["'](https?:\/\/[^"']+opinions[^"']+)["']/i) ||
-                       onclick.match(/["']([^"']*\.pdf[^"']*)["']/i);
+                       onclick.match(/["'](https?:\/\/[^"']+opinions[^"']+)["']/i);
       if (urlMatch) {
         results.push({
           pdfUrl: urlMatch[1],
           text: el.textContent?.trim() || '',
           rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
-          source: 'onclick'
-        });
-      }
-    }
-
-    // Method 2: Look for links with href containing PDF
-    const pdfLinks = document.querySelectorAll('a[href*=".pdf"]');
-    for (const el of pdfLinks) {
-      results.push({
-        pdfUrl: el.getAttribute('href'),
-        text: el.textContent?.trim() || '',
-        rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
-        source: 'href'
-      });
-    }
-
-    // Method 3: Look for links with href="javascript:" that might open PDFs
-    const jsLinks = document.querySelectorAll('a[href^="javascript:"]');
-    for (const el of jsLinks) {
-      const href = el.getAttribute('href') || '';
-      const pdfMatch = href.match(/['"]([^'"]*\.pdf[^'"]*)['"]/i);
-      if (pdfMatch) {
-        results.push({
-          pdfUrl: pdfMatch[1],
-          text: el.textContent?.trim() || '',
-          rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
-          source: 'javascript-href'
-        });
-      }
-    }
-
-    // Method 4: Look for data attributes that might contain PDF URLs
-    const dataElements = document.querySelectorAll('[data-pdf], [data-url], [data-href], [data-file]');
-    for (const el of dataElements) {
-      const pdfUrl = el.getAttribute('data-pdf') || el.getAttribute('data-url') ||
-                     el.getAttribute('data-href') || el.getAttribute('data-file');
-      if (pdfUrl && pdfUrl.includes('.pdf')) {
-        results.push({
-          pdfUrl: pdfUrl,
-          text: el.textContent?.trim() || '',
-          rowText: el.closest('tr')?.textContent?.trim() || el.parentElement?.textContent?.trim() || '',
-          source: 'data-attr'
-        });
-      }
-    }
-
-    // Method 5: Search for PDF URLs in all script tags
-    const scripts = document.querySelectorAll('script');
-    const pdfUrlPattern = /['"]([^'"]*opinions[^'"]*\.pdf)['"]/gi;
-    for (const script of scripts) {
-      const content = script.textContent || '';
-      let match;
-      while ((match = pdfUrlPattern.exec(content)) !== null) {
-        results.push({
-          pdfUrl: match[1],
-          text: '',
-          rowText: '',
-          source: 'script'
-        });
-      }
-    }
-
-    // Method 6: Look in the raw HTML for PDF URLs (as a fallback)
-    const htmlContent = document.body.innerHTML;
-    const allPdfUrls = htmlContent.match(/['"](\/opinions\/[^'"]*\.pdf)['"]/gi) ||
-                        htmlContent.match(/['"]([^'"]*appellate[^'"]*\.pdf)['"]/gi) ||
-                        htmlContent.match(/['"]([^'"]*coa[^'"]*\.pdf)['"]/gi) || [];
-    for (const match of allPdfUrls) {
-      const url = match.replace(/['"]/g, '');
-      if (!results.some(r => r.pdfUrl === url)) {
-        results.push({
-          pdfUrl: url,
-          text: '',
-          rowText: '',
-          source: 'html-regex'
         });
       }
     }
@@ -185,72 +221,38 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
     return results;
   });
 
-  console.log(`Found ${opinionData.length} potential opinion entries from page`);
-
-  // Debug: Log what we found
-  if (opinionData.length > 0) {
-    console.log('Sample opinion data found:', opinionData.slice(0, 5));
-  } else {
-    // Extra debugging if nothing found - dump page structure
-    const debugInfo = await page.evaluate(() => {
-      const body = document.body.innerHTML;
-      return {
-        hasPdfInHtml: body.includes('.pdf'),
-        hasOnclick: document.querySelectorAll('[onclick]').length,
-        hasJsHref: document.querySelectorAll('a[href^="javascript:"]').length,
-        sampleText: document.body.innerText.substring(0, 2000),
-        allOnclicks: Array.from(document.querySelectorAll('[onclick]')).slice(0, 10).map(el => ({
-          onclick: el.getAttribute('onclick')?.substring(0, 200),
-          text: el.textContent?.trim().substring(0, 50)
-        }))
-      };
-    });
-    console.log('Debug info:', JSON.stringify(debugInfo, null, 2));
-  }
+  console.log(`Found ${opinionData.length} opinion entries`);
 
   const opinions = [];
 
   for (const data of opinionData) {
-    try {
-      if (!data.pdfUrl) continue;
+    if (!data.pdfUrl) continue;
 
-      // Build full URL
-      let fullUrl = data.pdfUrl;
-      if (!fullUrl.startsWith('http')) {
-        fullUrl = fullUrl.startsWith('/')
-          ? `${config.nccourts.baseUrl}${fullUrl}`
-          : `${config.nccourts.baseUrl}/${fullUrl}`;
-      }
-
-      // Skip if already reviewed
-      if (reviewedUrls.has(fullUrl)) {
-        console.log(`Skipping already reviewed: ${data.text || fullUrl}`);
-        continue;
-      }
-
-      // Check if this is a published opinion (skip unpublished)
-      const contextText = (data.rowText || data.text || '').toLowerCase();
-      if (contextText.includes('unpublished')) {
-        console.log(`Skipping unpublished opinion: ${data.text || fullUrl}`);
-        continue;
-      }
-
-      const opinion = {
-        caseName: data.text || 'Unknown',
-        caseNumber: extractCaseNumber(data.rowText || data.text || ''),
-        pdfUrl: fullUrl,
-        filingDate: extractDateFromText(data.rowText || ''),
-        court: 'NC Court of Appeals',
-        year: year,
-        published: true,
-      };
-
-      opinions.push(opinion);
-      console.log(`Found new PUBLISHED opinion: ${opinion.caseName} - ${opinion.pdfUrl}`);
-
-    } catch (err) {
-      console.error('Error processing opinion data:', err.message);
+    // Skip if already reviewed
+    if (reviewedUrls.has(data.pdfUrl)) {
+      console.log(`Skipping already reviewed: ${data.text || data.pdfUrl}`);
+      continue;
     }
+
+    // Skip unpublished opinions
+    const contextText = (data.rowText || data.text || '').toLowerCase();
+    if (contextText.includes('unpublished')) {
+      console.log(`Skipping unpublished: ${data.text || data.pdfUrl}`);
+      continue;
+    }
+
+    const opinion = {
+      caseName: data.text || 'Unknown',
+      caseNumber: extractCaseNumber(data.rowText || data.text || ''),
+      pdfUrl: data.pdfUrl,
+      filingDate: extractDateFromText(data.rowText || ''),
+      court: 'NC Court of Appeals',
+      year: year,
+      published: true,
+    };
+
+    opinions.push(opinion);
+    console.log(`Found published opinion: ${opinion.caseName}`);
   }
 
   return opinions;
@@ -263,11 +265,10 @@ async function scrapeOpinionsFromPage(page, year, reviewedUrls) {
  */
 function extractCaseNumber(text) {
   const patterns = [
+    /\((\d{2,4}-\d+)[^)]*\)/i,  // (24-1035 - Published)
     /\b(\d{2,4}[-\s]?COA[-\s]?\d+)\b/i,
     /\b(COA\d{2}-\d+)\b/i,
     /\b(\d{2,4}[-\s]?(?:COA|CRS|CVS|SP|PA|SPA|WC)[-\s]?\d+)\b/i,
-    /\b(No\.\s*\d+[-A-Z]+\d*)\b/i,
-    /\b(\d{2}[A-Z]{2,3}\d+)\b/i,
   ];
 
   for (const pattern of patterns) {
@@ -276,6 +277,16 @@ function extractCaseNumber(text) {
   }
 
   return '';
+}
+
+/**
+ * Extract case number from filename
+ * @param {string} name - Case name/filename
+ * @returns {string}
+ */
+function extractCaseNumberFromName(name) {
+  const match = name.match(/(\d{2,4}-\d+)/);
+  return match ? match[1] : '';
 }
 
 /**
@@ -294,6 +305,7 @@ function extractDateFromText(text) {
  * @returns {Promise<Buffer>}
  */
 export async function downloadPdf(url) {
+  // If we already have a buffer (from zip extraction), this won't be called
   const browser = await puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
