@@ -238,7 +238,7 @@ export function extractCaseType(text) {
  * @returns {Object} Judge information
  */
 export function extractJudges(text) {
-  const firstPages = text.substring(0, 5000);
+  const firstPages = text.substring(0, 8000);
 
   const result = {
     author: null,
@@ -247,10 +247,15 @@ export function extractJudges(text) {
     panel: [],
   };
 
-  // Look for author patterns
+  // Look for author patterns - NC COA specific
   const authorPatterns = [
+    // "CARPENTER, Judge." or "TYSON, Judge."
+    /^([A-Z]+),\s+Judge\./m,
+    // "Judge Carpenter wrote..."
+    /Judge\s+([A-Z][a-z]+)\s+(?:wrote|delivered|authored)/i,
+    // "Opinion by Judge CARPENTER"
+    /Opinion\s+by\s+(?:Judge\s+)?([A-Z]+)/i,
     /(?:wrote|delivered|authored)\s+(?:the\s+)?(?:opinion|judgment)[^.]*by\s+(?:Judge|Justice|Chief\s+Justice)\s+([A-Z][a-z]+)/i,
-    /^([A-Z]+),\s+(?:Judge)/m,
     /([A-Z][a-z]+),\s+(?:Judge|Associate\s+Judge)/,
   ];
 
@@ -262,19 +267,96 @@ export function extractJudges(text) {
     }
   }
 
-  // Look for dissenting judges
-  const dissentMatch = firstPages.match(/([A-Z][a-z]+)(?:,?\s+(?:Judge|J\.?))?\s+(?:dissenting|dissented)/gi);
-  if (dissentMatch) {
-    result.dissenting = dissentMatch.map(m => m.replace(/,?\s+(?:Judge|J\.?)?\s+(?:dissenting|dissented)/i, '').trim());
+  // Look for dissenting judges - multiple patterns
+  const dissentPatterns = [
+    /([A-Z][a-z]+),?\s+(?:Judge|J\.?)?,?\s+dissenting/gi,
+    /([A-Z]+),?\s+(?:Judge|J\.?)?,?\s+dissenting/gi,
+    /dissenting[:\s]+(?:Judge\s+)?([A-Z][a-z]+)/gi,
+    /([A-Z][a-z]+)\s+(?:filed\s+a?\s*)?dissent/gi,
+  ];
+
+  for (const pattern of dissentPatterns) {
+    const matches = firstPages.matchAll(pattern);
+    for (const match of matches) {
+      const name = match[1].trim();
+      if (name.length > 1 && !result.dissenting.includes(name)) {
+        result.dissenting.push(name);
+      }
+    }
   }
 
-  // Look for concurring judges
-  const concurMatch = firstPages.match(/([A-Z][a-z]+)(?:,?\s+(?:Judge|J\.?))?\s+(?:concurring|concurred)/gi);
-  if (concurMatch) {
-    result.concurring = concurMatch.map(m => m.replace(/,?\s+(?:Judge|J\.?)?\s+(?:concurring|concurred)/i, '').trim());
+  // Look for concurring judges - multiple patterns
+  const concurPatterns = [
+    /([A-Z][a-z]+),?\s+(?:Judge|J\.?)?,?\s+concurring/gi,
+    /([A-Z]+),?\s+(?:Judge|J\.?)?,?\s+concurring/gi,
+    /concurring[:\s]+(?:Judge\s+)?([A-Z][a-z]+)/gi,
+    /([A-Z][a-z]+)\s+(?:filed\s+a?\s*)?concurr(?:ence|ing)/gi,
+  ];
+
+  for (const pattern of concurPatterns) {
+    const matches = firstPages.matchAll(pattern);
+    for (const match of matches) {
+      const name = match[1].trim();
+      if (name.length > 1 && !result.concurring.includes(name)) {
+        result.concurring.push(name);
+      }
+    }
   }
 
   return result;
+}
+
+/**
+ * Extract dissenting opinion content
+ * @param {string} text - Full PDF text
+ * @returns {string|null} Dissenting opinion text
+ */
+export function extractDissentContent(text) {
+  // Look for dissent section
+  const dissentPatterns = [
+    /(?:DISSENT|DISSENTING\s+OPINION)[:\s]*([\s\S]{200,3000}?)(?=\n\s*(?:CONCUR|$|\n{3,}))/i,
+    /([A-Z]+),?\s+(?:Judge|J\.?)?,?\s+dissenting[:\.]?\s*([\s\S]{200,3000}?)(?=\n\s*(?:CONCUR|$|\n{3,}))/i,
+    /I\s+(?:respectfully\s+)?dissent[\s\S]{0,50}([\s\S]{200,2500}?)(?=\n{3,}|$)/i,
+  ];
+
+  for (const pattern of dissentPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      // Return the dissent content (might be in match[1] or match[2] depending on pattern)
+      const content = match[2] || match[1];
+      if (content && content.length > 100) {
+        return content.substring(0, 3000).trim();
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extract concurring opinion content
+ * @param {string} text - Full PDF text
+ * @returns {string|null} Concurring opinion text
+ */
+export function extractConcurrenceContent(text) {
+  // Look for concurrence section
+  const concurPatterns = [
+    /(?:CONCUR|CONCURRING\s+OPINION)[:\s]*([\s\S]{200,3000}?)(?=\n\s*(?:DISSENT|$|\n{3,}))/i,
+    /([A-Z]+),?\s+(?:Judge|J\.?)?,?\s+concurring[:\.]?\s*([\s\S]{200,3000}?)(?=\n\s*(?:DISSENT|$|\n{3,}))/i,
+    /I\s+(?:respectfully\s+)?concur[\s\S]{0,50}([\s\S]{200,2500}?)(?=\n{3,}|$)/i,
+  ];
+
+  for (const pattern of concurPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const content = match[2] || match[1];
+      if (content && content.length > 100) {
+        return content.substring(0, 3000).trim();
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -295,6 +377,20 @@ export function getFirstPageContent(text) {
 export async function extractOpinionInfo(pdfBuffer) {
   const { text, numPages, info } = await parsePdf(pdfBuffer);
 
+  const judges = extractJudges(text);
+
+  // Extract dissent/concurrence content if they exist
+  let dissentContent = null;
+  let concurrenceContent = null;
+
+  if (judges.dissenting.length > 0) {
+    dissentContent = extractDissentContent(text);
+  }
+
+  if (judges.concurring.length > 0) {
+    concurrenceContent = extractConcurrenceContent(text);
+  }
+
   return {
     fullText: text,
     numPages,
@@ -302,7 +398,11 @@ export async function extractOpinionInfo(pdfBuffer) {
     opinionDate: extractOpinionDate(text),
     caseName: extractCaseName(text),
     caseType: extractCaseType(text),
-    judges: extractJudges(text),
+    judges,
+    dissentContent,
+    concurrenceContent,
+    hasDissent: judges.dissenting.length > 0,
+    hasConcurrence: judges.concurring.length > 0,
     firstPageContent: getFirstPageContent(text),
   };
 }

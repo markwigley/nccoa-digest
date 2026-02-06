@@ -33,7 +33,7 @@ export async function generateSummary(opinionInfo) {
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
+    max_tokens: 1500,
     messages: [
       {
         role: 'user',
@@ -57,6 +57,27 @@ export async function generateSummary(opinionInfo) {
  * @returns {string} Formatted prompt
  */
 function buildPrompt(opinionInfo) {
+  // Build dissent/concurrence sections if they exist
+  let separateOpinionsSection = '';
+
+  if (opinionInfo.hasDissent && opinionInfo.dissentContent) {
+    separateOpinionsSection += `\n\nDISSENTING OPINION TEXT:\n${opinionInfo.dissentContent}`;
+  }
+
+  if (opinionInfo.hasConcurrence && opinionInfo.concurrenceContent) {
+    separateOpinionsSection += `\n\nCONCURRING OPINION TEXT:\n${opinionInfo.concurrenceContent}`;
+  }
+
+  // Build instructions about dissent/concurrence
+  let dissentInstructions = '';
+  if (opinionInfo.hasDissent || opinionInfo.hasConcurrence) {
+    dissentInstructions = `
+8. IMPORTANT - DISSENTS AND CONCURRENCES: If there is a dissenting or concurring opinion:
+   - Note it in the judge parenthetical (e.g., "King dissenting" or "Smith concurring")
+   - After summarizing the majority opinion, add 1-3 sentences summarizing the key points of the dissent/concurrence
+   - Format: "Judge [Name] dissented, arguing that..." or "In a concurrence, Judge [Name] wrote that..."`;
+  }
+
   return `You are a legal analyst creating concise summaries of NC Court of Appeals opinions for a weekly digest sent to attorneys. Generate a summary in the exact style shown in the examples below.
 
 IMPORTANT FORMATTING REQUIREMENTS:
@@ -66,10 +87,10 @@ IMPORTANT FORMATTING REQUIREMENTS:
    - For criminal cases, format as "State v. [Defendant's Last Name]"
 2. Follow with a date parenthetical using the opinion date from the first page: (Mon. DD, YYYY)
 3. Include case type/subject in parentheses: (Civil – Employment) or (Criminal – Sentencing)
-4. Include judge names in parentheses with the author in CAPS, others in regular case, and note any dissents
+4. Include judge names in parentheses with the author in CAPS, others in regular case, and note any dissents/concurrences
 5. Write 2-4 sentences summarizing: the key issue, the court's holding, and the reasoning
 6. Keep the tone professional and informative
-7. Use legal terminology appropriately
+7. Use legal terminology appropriately${dissentInstructions}
 
 EXAMPLE SUMMARIES:
 
@@ -79,20 +100,24 @@ EXAMPLE SUMMARIES:
 
 **State v. Johnson** (Jan. 31, 2026) (Criminal – Sentencing) (GREGORY, Diaz, Keenan, Diaz dissenting): Defendant Johnson challenged his 36-month supervised release revocation sentence as plainly unreasonable, arguing the trial court failed to adequately explain why it imposed the statutory maximum despite his claims of mitigating circumstances. The Court of Appeals agreed and vacated, holding that when a court imposes an upward departure from the advisory guidelines range, it must provide a "more significant justification" and meaningfully address the defendant's nonfrivolous mitigation arguments—which the trial court failed to do.
 
+**Martinez v. City Council** (Feb. 1, 2026) (Civil – Zoning) (THOMPSON, Lee, Park concurring): The Court affirmed the trial court's denial of a variance request, finding that the city council properly applied the hardship standard. Judge Park filed a concurrence emphasizing that while agreeing with the result, the majority's broad language about deference to municipal bodies should not be read to limit future judicial review of arbitrary zoning decisions.
+
 NOW GENERATE A SUMMARY FOR THIS NC COURT OF APPEALS OPINION:
 
 Case Name: ${opinionInfo.caseName || 'Unknown'}
 Opinion Date (from first page): ${opinionInfo.opinionDate || 'Unknown'}
 Case Type: ${opinionInfo.caseType || 'Unknown'}
 Judges: ${formatJudges(opinionInfo.judges)}
+Has Dissent: ${opinionInfo.hasDissent ? 'Yes' : 'No'}
+Has Concurrence: ${opinionInfo.hasConcurrence ? 'Yes' : 'No'}
 Court: NC Court of Appeals
 
-OPINION TEXT (first several pages):
-${opinionInfo.firstPageContent}
+MAJORITY OPINION TEXT (first several pages):
+${opinionInfo.firstPageContent}${separateOpinionsSection}
 
 ---
 
-Generate only the summary paragraph, nothing else. Start with the case name in bold (extract from the opinion text above - look for "X v. Y" pattern near the top). Do NOT use a case number like "${opinionInfo.caseName}" if it looks like a number - always use the actual party names.`;
+Generate only the summary paragraph, nothing else. Start with the case name in bold (extract from the opinion text above - look for "X v. Y" pattern near the top). Do NOT use a case number like "${opinionInfo.caseName}" if it looks like a number - always use the actual party names.${opinionInfo.hasDissent || opinionInfo.hasConcurrence ? ' IMPORTANT: Include a summary of any dissent or concurrence at the end of your summary.' : ''}`;
 }
 
 /**
