@@ -4,12 +4,12 @@ Automated weekly digest of NC Court of Appeals opinions. This program scrapes ne
 
 ## Features
 
-- **Automated Scraping**: Fetches new opinions from https://appellate.nccourts.org/opinion-filings/?c=coa
-- **Year-Aware**: Automatically selects the current year from the dropdown menu
+- **Automated Scraping**: Fetches opinions from https://appellate.nccourts.org/opinion-filings/?c=coa
+- **Weekly Filtering**: Only processes opinions filed within the past 7 days (no duplicates)
 - **PDF Parsing**: Extracts text and metadata from opinion PDFs
 - **AI Summaries**: Generates professional legal summaries using Claude
+- **Dissent/Concurrence**: Includes summaries of dissenting and concurring opinions
 - **Email Delivery**: Sends formatted HTML/text digests to configurable recipients
-- **Persistent Tracking**: SQLite database tracks reviewed opinions to avoid duplicates
 - **Scheduled Execution**: Runs automatically every Friday at 5 PM Eastern
 
 ## Installation
@@ -44,9 +44,6 @@ SMTP_FROM=your-email@gmail.com
 # Optional: Email recipients (comma-separated)
 # Default: mswigley@wardandsmith.com
 EMAIL_RECIPIENTS=recipient1@example.com,recipient2@example.com
-
-# Optional: Database location
-DB_PATH=./data/coa-opinions.db
 
 # Optional: Browser settings
 BROWSER_HEADLESS=true
@@ -144,46 +141,26 @@ nccoa-digest/
 ├── src/
 │   ├── index.js          # Main entry point
 │   ├── config.js         # Configuration management
-│   ├── database.js       # SQLite database operations
 │   ├── scraper.js        # Web scraping with Puppeteer
 │   ├── pdfParser.js      # PDF text extraction
 │   ├── summaryGenerator.js # AI summary generation
 │   ├── emailSender.js    # Email delivery
 │   └── scheduler.js      # Cron scheduling
-├── data/
-│   └── coa-opinions.db   # SQLite database (created automatically)
+├── Dockerfile            # Docker configuration for Render
 ├── package.json
 └── README.md
 ```
-
-## Database
-
-The SQLite database tracks:
-- Opinion metadata (case name, number, court)
-- PDF URLs (used to detect duplicates)
-- Opinion dates
-- Generated summaries
-- Review and email timestamps
 
 ## Render Deployment
 
 This program is designed to run on Render as a cron job with Docker.
 
-### Setting Up Persistent Storage
+### How Duplicates Are Avoided
 
-**IMPORTANT**: To track reviewed opinions and avoid duplicates, you MUST set up a persistent disk:
-
-1. In your Render dashboard, go to your cron job settings
-2. Under **Disks**, click "Add Disk"
-3. Configure the disk:
-   - **Name**: `data`
-   - **Mount Path**: `/data`
-   - **Size**: 1 GB (minimum)
-4. Under **Environment**, add the variable:
-   - **Key**: `DB_PATH`
-   - **Value**: `/data/coa-opinions.db`
-
-Without persistent storage, the database resets on each run and all opinions will be treated as "new" every time.
+The program only processes opinions filed within the **past 7 days**. This means:
+- Each weekly run automatically filters to only recent opinions
+- No persistent storage is required
+- No duplicate opinions across digest emails
 
 ### Environment Variables for Render
 
@@ -194,10 +171,7 @@ Without persistent storage, the database resets on each run and all opinions wil
 | `SMTP_PASS` | Yes | SMTP password or app password |
 | `SMTP_HOST` | No | SMTP server (default: smtp.gmail.com) |
 | `SMTP_PORT` | No | SMTP port (default: 587) |
-| `DB_PATH` | Yes* | Database path (set to `/data/coa-opinions.db` with disk) |
 | `EMAIL_RECIPIENTS` | No | Comma-separated list of recipients |
-
-*Required when using persistent disk
 
 ### Schedule
 
@@ -227,18 +201,9 @@ Some PDFs may be scanned images. The parser extracts text from text-based PDFs o
 
 ### No New Opinions Found
 
-- The program tracks previously reviewed opinions
-- Delete `data/coa-opinions.db` to reset tracking
-- Verify the website is accessible and has new opinions
-
-### All Opinions Treated as New (Duplicates in Digest)
-
-This means the database is not persisting between runs. On Render:
-1. Verify you have a persistent disk configured (see "Render Deployment" above)
-2. Ensure `DB_PATH` environment variable is set to `/data/coa-opinions.db`
-3. Check the disk is mounted at `/data`
-
-Without persistent storage, Docker containers lose all local files between runs.
+- The program only includes opinions filed within the past 7 days
+- If no opinions were filed recently, the digest will be empty
+- Verify the website is accessible at https://appellate.nccourts.org/opinion-filings/?c=coa
 
 ## Difference from NC Supreme Court Digest
 

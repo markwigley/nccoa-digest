@@ -22,12 +22,33 @@
  */
 
 import { config, getRecipients } from './config.js';
-import { initDatabase, isOpinionReviewed, saveOpinion, markAsEmailed, closeDatabase } from './database.js';
 import { fetchNewOpinions, downloadPdf } from './scraper.js';
 import { extractOpinionInfo } from './pdfParser.js';
 import { generateSummary } from './summaryGenerator.js';
 import { sendWeeklyDigest, sendTestEmail, verifyEmailConfig } from './emailSender.js';
 import { startScheduler, getNextRunTime, getTimeUntilNextRun } from './scheduler.js';
+
+/**
+ * Check if a date string is within the past N days
+ * @param {string} dateStr - Date string (e.g., "Jan. 15, 2026")
+ * @param {number} days - Number of days to look back (default: 7)
+ * @returns {boolean}
+ */
+function isWithinPastDays(dateStr, days = 7) {
+  if (!dateStr) return false;
+
+  try {
+    const opinionDate = new Date(dateStr);
+    if (isNaN(opinionDate.getTime())) return false;
+
+    const now = new Date();
+    const cutoffDate = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
+
+    return opinionDate >= cutoffDate;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Main digest generation job
@@ -39,29 +60,25 @@ async function runDigestJob() {
   console.log(new Date().toISOString());
   console.log('='.repeat(60) + '\n');
 
-  // Initialize database
-  console.log('Initializing database...');
-  initDatabase();
-
   try {
-    // Step 1: Fetch new opinions from the website
-    console.log('\nStep 1: Fetching new opinions from NC Court of Appeals...');
-    const newOpinions = await fetchNewOpinions();
+    // Step 1: Fetch opinions from the website
+    console.log('\nStep 1: Fetching opinions from NC Court of Appeals...');
+    const allOpinions = await fetchNewOpinions();
 
-    if (newOpinions.length === 0) {
-      console.log('\nNo new opinions found. Nothing to process.');
+    if (allOpinions.length === 0) {
+      console.log('\nNo opinions found. Nothing to process.');
       return;
     }
 
-    console.log(`\nFound ${newOpinions.length} new opinion(s) to process`);
+    console.log(`\nFound ${allOpinions.length} opinion(s) in the zip file`);
 
-    // Step 2: Download and parse each opinion, generate summaries
-    console.log('\nStep 2: Processing opinions and generating summaries...');
-    const processedOpinions = [];
+    // Step 2: Extract info and filter to only opinions from the past 7 days
+    console.log('\nStep 2: Processing opinions and filtering by date...');
+    const recentOpinions = [];
 
-    for (let i = 0; i < newOpinions.length; i++) {
-      const opinion = newOpinions[i];
-      console.log(`\n[${i + 1}/${newOpinions.length}] Processing: ${opinion.caseName || opinion.pdfUrl}`);
+    for (let i = 0; i < allOpinions.length; i++) {
+      const opinion = allOpinions[i];
+      console.log(`\n[${i + 1}/${allOpinions.length}] Checking: ${opinion.caseName || opinion.pdfUrl}`);
 
       try {
         // Get PDF buffer - either already have it (from zip) or need to download
@@ -86,64 +103,77 @@ async function runDigestJob() {
           opinionDate: opinionInfo.opinionDate || opinion.filingDate,
         };
 
-        // Generate summary
-        console.log('  Generating summary...');
-        const summary = await generateSummary(fullOpinionInfo);
-
-        const processedOpinion = {
-          ...fullOpinionInfo,
-          summary,
-        };
-
-        processedOpinions.push(processedOpinion);
-
-        // Save to database
-        saveOpinion(processedOpinion);
-        console.log('  ✓ Saved to database');
-
-        // Rate limiting between opinions
-        if (i < newOpinions.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+        // Check if opinion is from the past 7 days
+        if (!isWithinPastDays(fullOpinionInfo.opinionDate, 7)) {
+          console.log(`  ⏭ Skipping: Filed ${fullOpinionInfo.opinionDate} (older than 7 days)`);
+          continue;
         }
+
+        console.log(`  ✓ Recent opinion: Filed ${fullOpinionInfo.opinionDate}`);
+        recentOpinions.push(fullOpinionInfo);
 
       } catch (err) {
         console.error(`  ✗ Error processing opinion: ${err.message}`);
-        // Still save the opinion even if processing failed
-        saveOpinion({
+      }
+    }
+
+    if (recentOpinions.length === 0) {
+      console.log('\nNo opinions from the past 7 days. Nothing to send.');
+      return;
+    }
+
+    console.log(`\nFound ${recentOpinions.length} opinion(s) from the past 7 days`);
+
+    // Step 3: Generate summaries for recent opinions
+    console.log('\nStep 3: Generating summaries...');
+    const processedOpinions = [];
+
+    for (let i = 0; i < recentOpinions.length; i++) {
+      const opinion = recentOpinions[i];
+      console.log(`\n[${i + 1}/${recentOpinions.length}] Summarizing: ${opinion.caseName}`);
+
+      try {
+        const summary = await generateSummary(opinion);
+        processedOpinions.push({
           ...opinion,
-          summary: `[Processing failed: ${err.message}]`,
+          summary,
+        });
+        console.log('  ✓ Summary generated');
+
+        // Rate limiting between API calls
+        if (i < recentOpinions.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (err) {
+        console.error(`  ✗ Error generating summary: ${err.message}`);
+        processedOpinions.push({
+          ...opinion,
+          summary: `[Summary generation failed: ${err.message}]`,
         });
       }
     }
 
-    // Step 3: Send email digest
+    // Step 4: Send email digest
     if (processedOpinions.length > 0) {
-      console.log('\nStep 3: Sending email digest...');
+      console.log('\nStep 4: Sending email digest...');
       console.log(`Recipients: ${getRecipients().join(', ')}`);
 
       try {
         await sendWeeklyDigest(processedOpinions, new Date());
         console.log('✓ Email sent successfully');
-
-        // Mark opinions as emailed
-        markAsEmailed(processedOpinions.map(o => o.pdfUrl));
-
       } catch (err) {
         console.error('✗ Failed to send email:', err.message);
-        console.log('  Opinions have been saved to database and will be included in next digest');
       }
     }
 
     console.log('\n' + '='.repeat(60));
     console.log('Digest job completed');
-    console.log(`Processed ${processedOpinions.length} opinion(s)`);
+    console.log(`Processed ${processedOpinions.length} opinion(s) from the past week`);
     console.log('='.repeat(60) + '\n');
 
   } catch (err) {
     console.error('\nDigest job failed:', err);
     throw err;
-  } finally {
-    closeDatabase();
   }
 }
 
@@ -183,7 +213,6 @@ Environment Variables:
   SMTP_PASS           SMTP password (required for email)
   SMTP_FROM           From email address (defaults to SMTP_USER)
   EMAIL_RECIPIENTS    Comma-separated email recipients
-  DB_PATH             Database file path (default: ./data/coa-opinions.db)
   BROWSER_HEADLESS    Set to 'false' for visible browser (default: true)
 
 Examples:
@@ -220,9 +249,9 @@ async function main() {
   // Show configuration
   console.log('Configuration:');
   console.log(`  Recipients: ${getRecipients().join(', ')}`);
-  console.log(`  Database: ${config.database.path}`);
   console.log(`  Anthropic API: ${config.anthropic.apiKey ? 'Configured' : 'NOT CONFIGURED'}`);
   console.log(`  SMTP: ${config.email.smtp.auth.user ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`  Filter: Only opinions from the past 7 days`);
   console.log('');
 
   // Test email mode
@@ -264,13 +293,11 @@ async function main() {
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('\nShutting down...');
-    closeDatabase();
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
     console.log('\nShutting down...');
-    closeDatabase();
     process.exit(0);
   });
 }
