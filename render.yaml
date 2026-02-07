@@ -4,6 +4,10 @@ services:
     runtime: docker
     schedule: "0 22 * * 5"  # Every Friday at 5 PM EST (10 PM UTC)
     dockerfilePath: ./Dockerfile
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -15,3 +19,5 @@ services:
         value: smtp.gmail.com
       - key: SMTP_PORT
         value: "587"
+      - key: DB_PATH
+        value: /data/coa-opinions.db

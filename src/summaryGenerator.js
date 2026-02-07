@@ -85,7 +85,7 @@ IMPORTANT FORMATTING REQUIREMENTS:
    - CRITICAL: Always use the actual party names (e.g., "Advisor Law, LLC v. Holland"), NOT the case number (e.g., "24-1035")
    - Extract the case name from the opinion text - it's usually near the top (e.g., "ADVISOR LAW, LLC v. HOLLAND")
    - For criminal cases, format as "State v. [Defendant's Last Name]"
-2. Follow with a date parenthetical using the opinion date from the first page: (Mon. DD, YYYY)
+2. Follow with a date parenthetical using the FILED DATE shown at the top of the opinion (NOT today's date): (Mon. DD, YYYY)
 3. Include case type/subject in parentheses: (Civil – Employment) or (Criminal – Sentencing)
 4. Include judge names in parentheses with the author in CAPS, others in regular case, and note any dissents/concurrences
 5. Write 2-4 sentences summarizing: the key issue, the court's holding, and the reasoning
@@ -105,7 +105,7 @@ EXAMPLE SUMMARIES:
 NOW GENERATE A SUMMARY FOR THIS NC COURT OF APPEALS OPINION:
 
 Case Name: ${opinionInfo.caseName || 'Unknown'}
-Opinion Date (from first page): ${opinionInfo.opinionDate || 'Unknown'}
+FILED DATE (from "Filed [date]" at top of opinion): ${opinionInfo.opinionDate || 'Unknown'}
 Case Type: ${opinionInfo.caseType || 'Unknown'}
 Judges: ${formatJudges(opinionInfo.judges)}
 Has Dissent: ${opinionInfo.hasDissent ? 'Yes' : 'No'}

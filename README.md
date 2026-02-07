@@ -165,6 +165,47 @@ The SQLite database tracks:
 - Generated summaries
 - Review and email timestamps
 
+## Render Deployment
+
+This program is designed to run on Render as a cron job with Docker.
+
+### Setting Up Persistent Storage
+
+**IMPORTANT**: To track reviewed opinions and avoid duplicates, you MUST set up a persistent disk:
+
+1. In your Render dashboard, go to your cron job settings
+2. Under **Disks**, click "Add Disk"
+3. Configure the disk:
+   - **Name**: `data`
+   - **Mount Path**: `/data`
+   - **Size**: 1 GB (minimum)
+4. Under **Environment**, add the variable:
+   - **Key**: `DB_PATH`
+   - **Value**: `/data/coa-opinions.db`
+
+Without persistent storage, the database resets on each run and all opinions will be treated as "new" every time.
+
+### Environment Variables for Render
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Your Anthropic API key for Claude |
+| `SMTP_USER` | Yes | SMTP username (email address) |
+| `SMTP_PASS` | Yes | SMTP password or app password |
+| `SMTP_HOST` | No | SMTP server (default: smtp.gmail.com) |
+| `SMTP_PORT` | No | SMTP port (default: 587) |
+| `DB_PATH` | Yes* | Database path (set to `/data/coa-opinions.db` with disk) |
+| `EMAIL_RECIPIENTS` | No | Comma-separated list of recipients |
+
+*Required when using persistent disk
+
+### Schedule
+
+The render.yaml configures the cron job to run at 10 PM UTC (5 PM Eastern) every Friday:
+```
+schedule: "0 22 * * 5"
+```
+
 ## Troubleshooting
 
 ### Website Blocks Requests
@@ -189,6 +230,15 @@ Some PDFs may be scanned images. The parser extracts text from text-based PDFs o
 - The program tracks previously reviewed opinions
 - Delete `data/coa-opinions.db` to reset tracking
 - Verify the website is accessible and has new opinions
+
+### All Opinions Treated as New (Duplicates in Digest)
+
+This means the database is not persisting between runs. On Render:
+1. Verify you have a persistent disk configured (see "Render Deployment" above)
+2. Ensure `DB_PATH` environment variable is set to `/data/coa-opinions.db`
+3. Check the disk is mounted at `/data`
+
+Without persistent storage, Docker containers lose all local files between runs.
 
 ## Difference from NC Supreme Court Digest
 
