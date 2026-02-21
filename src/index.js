@@ -140,9 +140,9 @@ async function runDigestJob() {
         });
         console.log('  ✓ Summary generated');
 
-        // Rate limiting between API calls
+        // Rate limiting between API calls - 10s gap to stay under token/minute limits
         if (i < recentOpinions.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 10000));
         }
       } catch (err) {
         console.error(`  ✗ Error generating summary: ${err.message}`);

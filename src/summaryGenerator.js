@@ -28,27 +28,38 @@ function getClient() {
  */
 export async function generateSummary(opinionInfo) {
   const anthropic = getClient();
-
   const prompt = buildPrompt(opinionInfo);
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1500,
-    messages: [
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ],
-  });
+  const maxRetries = 4;
+  let delay = 30000; // Start with 30 seconds on rate limit
 
-  // Extract text from response
-  const summary = response.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('');
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      });
 
-  return summary.trim();
+      return response.content
+        .filter(block => block.type === 'text')
+        .map(block => block.text)
+        .join('')
+        .trim();
+
+    } catch (err) {
+      const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate_limit'));
+
+      if (isRateLimit && attempt < maxRetries) {
+        console.log(`  Rate limit hit. Waiting ${delay / 1000}s before retry ${attempt}/${maxRetries - 1}...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Exponential backoff
+        continue;
+      }
+
+      throw err;
+    }
+  }
 }
 
 /**
